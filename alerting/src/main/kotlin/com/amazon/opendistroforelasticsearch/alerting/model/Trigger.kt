@@ -15,6 +15,7 @@
 
 package com.amazon.opendistroforelasticsearch.alerting.model
 
+import com.amazon.opendistroforelasticsearch.alerting.aggregation.BucketSelectorExtAggregationBuilder
 import com.amazon.opendistroforelasticsearch.alerting.model.action.Action
 import org.elasticsearch.common.UUIDs
 import org.elasticsearch.common.io.stream.StreamInput
@@ -25,13 +26,13 @@ import org.elasticsearch.common.xcontent.XContentBuilder
 import org.elasticsearch.common.xcontent.XContentParser
 import org.elasticsearch.common.xcontent.XContentParser.Token
 import org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken
-import org.elasticsearch.script.Script
 import java.io.IOException
 
 data class Trigger(
     val name: String,
     val severity: String,
-    val condition: Script,
+    //val condition: Script,
+    val bucketSelector: BucketSelectorExtAggregationBuilder,
     val actions: List<Action>,
     val id: String = UUIDs.base64UUID()
 ) : Writeable, ToXContent {
@@ -40,7 +41,7 @@ data class Trigger(
     constructor(sin: StreamInput): this(
             sin.readString(), // name
             sin.readString(), // severity
-            Script(sin), // condition
+            BucketSelectorExtAggregationBuilder(sin), // condition
             sin.readList(::Action), // actions
             sin.readString() // id
     )
@@ -50,8 +51,8 @@ data class Trigger(
                 .field(NAME_FIELD, name)
                 .field(SEVERITY_FIELD, severity)
                 .startObject(CONDITION_FIELD)
-                .field(SCRIPT_FIELD, condition)
-                .endObject()
+        bucketSelector.internalXContent(builder, params)
+        builder.endObject()
                 .field(ACTIONS_FIELD, actions.toTypedArray())
                 .endObject()
         return builder
@@ -67,7 +68,7 @@ data class Trigger(
     override fun writeTo(out: StreamOutput) {
         out.writeString(name)
         out.writeString(severity)
-        condition.writeTo(out)
+        bucketSelector.writeTo(out)
         out.writeCollection(actions)
         out.writeString(id)
     }
@@ -78,32 +79,27 @@ data class Trigger(
         const val SEVERITY_FIELD = "severity"
         const val CONDITION_FIELD = "condition"
         const val ACTIONS_FIELD = "actions"
-        const val SCRIPT_FIELD = "script"
+        //const val SCRIPT_FIELD = "script"
 
         @JvmStatic @Throws(IOException::class)
         fun parse(xcp: XContentParser): Trigger {
             var id = UUIDs.base64UUID() // assign a default triggerId if one is not specified
             lateinit var name: String
             lateinit var severity: String
-            lateinit var condition: Script
+            //lateinit var condition: Script
+            lateinit var bucketSelector: BucketSelectorExtAggregationBuilder
             val actions: MutableList<Action> = mutableListOf()
             ensureExpectedToken(Token.START_OBJECT, xcp.currentToken(), xcp)
 
             while (xcp.nextToken() != Token.END_OBJECT) {
                 val fieldName = xcp.currentName()
-
                 xcp.nextToken()
                 when (fieldName) {
                     ID_FIELD -> id = xcp.text()
                     NAME_FIELD -> name = xcp.text()
                     SEVERITY_FIELD -> severity = xcp.text()
                     CONDITION_FIELD -> {
-                        xcp.nextToken()
-                        condition = Script.parse(xcp)
-                        require(condition.lang == Script.DEFAULT_SCRIPT_LANG) {
-                            "Invalid script language. Allowed languages are [${Script.DEFAULT_SCRIPT_LANG}]"
-                        }
-                        xcp.nextToken()
+                        bucketSelector = BucketSelectorExtAggregationBuilder.parse(name, xcp)
                     }
                     ACTIONS_FIELD -> {
                         ensureExpectedToken(Token.START_ARRAY, xcp.currentToken(), xcp)
@@ -117,7 +113,8 @@ data class Trigger(
             return Trigger(
                     name = requireNotNull(name) { "Trigger name is null" },
                     severity = requireNotNull(severity) { "Trigger severity is null" },
-                    condition = requireNotNull(condition) { "Trigger is null" },
+                    //condition = condition,
+                    bucketSelector = bucketSelector,
                     actions = requireNotNull(actions) { "Trigger actions are null" },
                     id = requireNotNull(id) { "Trigger id is null." })
         }

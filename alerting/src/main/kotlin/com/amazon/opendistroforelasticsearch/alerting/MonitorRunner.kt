@@ -266,6 +266,14 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
             logger.error("Error loading alerts for monitor: $id", e)
             return monitorResult.copy(error = e)
         }
+
+        if (!isAggregationMonitor(monitor)) {
+            if (currentAlerts.size > 1) {
+                logger.error("Multiple alerts not supported for non-aggregation monitor")
+                return monitorResult.copy(error = java.lang.Exception("Multiple alerts not supported for non-aggregation monitor"))
+            }
+        }
+
         if (!isADMonitor(monitor)) {
             runBlocking(InjectorContextElement(monitor.id, settings, threadPool.threadContext, roles)) {
                 monitorResult = monitorResult.copy(inputResults = inputService.collectInputResults(monitor, periodStart, periodEnd))
@@ -277,21 +285,30 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
         val updatedAlerts = mutableListOf<Alert>()
         val triggerResults = mutableMapOf<String, TriggerRunResult>()
         for (trigger in monitor.triggers) {
-            val currentAlert = currentAlerts[trigger]
-            val triggerCtx = TriggerExecutionContext(monitor, trigger, monitorResult, currentAlert)
-            val triggerResult = triggerService.runTrigger(monitor, trigger, triggerCtx)
-            triggerResults[trigger.id] = triggerResult
+            if (isAggregationMonitor(monitor)) {
+                val currentAlerts = currentAlerts[trigger]
+                //val triggerCtx = TriggerExecutionContext(monitor, trigger, monitorResult, currentAlerts)
+                //val triggerResult = triggerService.runTrigger(monitor, trigger, triggerCtx)
+                //triggerResults[trigger.id] = triggerResult
+            } else {
+                val currentAlert = currentAlerts[trigger]?.firstOrNull()
+                val triggerCtx = TriggerExecutionContext(monitor, trigger, monitorResult, currentAlert)
+                val triggerResult = triggerService.runTrigger(monitor, trigger, triggerCtx)
+                triggerResults[trigger.id] = triggerResult
 
-            if (triggerService.isTriggerActionable(triggerCtx, triggerResult)) {
-                val actionCtx = triggerCtx.copy(error = monitorResult.error ?: triggerResult.error)
-                for (action in trigger.actions) {
-                    triggerResult.actionResults[action.id] = runAction(action, actionCtx, dryrun)
+                if (triggerService.isTriggerActionable(triggerCtx, triggerResult)) {
+                    val actionCtx = triggerCtx.copy(error = monitorResult.error ?: triggerResult.error)
+                    for (action in trigger.actions) {
+                        triggerResult.actionResults[action.id] = runAction(action, actionCtx, dryrun)
+                    }
                 }
-            }
 
-            val updatedAlert = alertService.composeAlert(triggerCtx, triggerResult,
-                monitorResult.alertError() ?: triggerResult.alertError())
-            if (updatedAlert != null) updatedAlerts += updatedAlert
+                val updatedAlert = alertService.composeAlert(
+                    triggerCtx, triggerResult,
+                    monitorResult.alertError() ?: triggerResult.alertError()
+                )
+                if (updatedAlert != null) updatedAlerts += updatedAlert
+            }
         }
 
         // Don't save alerts if this is a test monitor
@@ -355,5 +372,9 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
         return scriptService.compile(template, TemplateScript.CONTEXT)
                 .newInstance(template.params + mapOf("ctx" to ctx.asTemplateArg()))
                 .execute()
+    }
+
+    private fun isAggregationMonitor(monitor: Monitor): Boolean {
+        return false
     }
 }

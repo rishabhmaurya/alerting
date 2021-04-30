@@ -61,7 +61,7 @@ class AlertService(
 
     private val logger = LogManager.getLogger(AlertService::class.java)
 
-    suspend fun loadCurrentAlerts(monitor: Monitor): Map<Trigger, Alert?> {
+    suspend fun loadCurrentAlerts(monitor: Monitor): Map<Trigger, List<Alert>?> {
         val request = SearchRequest(AlertIndices.ALERT_INDEX)
             .routing(monitor.id)
             .source(alertQuery(monitor))
@@ -79,7 +79,7 @@ class AlertService(
         }
 
         return monitor.triggers.associate { trigger ->
-            trigger to (foundAlerts[trigger.id]?.firstOrNull())
+            trigger to (foundAlerts[trigger.id])
         }
     }
 
