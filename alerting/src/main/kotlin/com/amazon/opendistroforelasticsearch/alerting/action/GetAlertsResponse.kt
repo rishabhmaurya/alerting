@@ -27,6 +27,7 @@ import java.util.Collections
 
 class GetAlertsResponse : ActionResponse, ToXContentObject {
     val alerts: List<Alert>
+
     // totalAlerts is not the same as the size of alerts because there can be 30 alerts from the request, but
     // the request only asked for 5 alerts, so totalAlerts will be 30, but alerts will only contain 5 alerts
     val totalAlerts: Int?

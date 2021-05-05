@@ -246,6 +246,10 @@ data class Monitor(
                         while (xcp.nextToken() != Token.END_ARRAY) {
                             triggers.add(Trigger.parse(xcp))
                         }
+                        /*
+                        if (monitorType != getTriggerType(triggers).toString()) {
+                            throw IllegalStateException("All trigger definitions should be of type $monitorType")
+                        }*/
                     }
                     ENABLED_TIME_FIELD -> enabledTime = xcp.instant()
                     LAST_UPDATE_TIME_FIELD -> lastUpdateTime = xcp.instant()

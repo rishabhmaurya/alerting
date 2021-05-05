@@ -27,12 +27,17 @@ import com.amazon.opendistroforelasticsearch.alerting.model.AlertingConfigAccess
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import com.amazon.opendistroforelasticsearch.alerting.model.MonitorRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTrigger
+import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTriggerRunResult
+import com.amazon.opendistroforelasticsearch.alerting.model.AggMonitorTriggerRunResult
+import com.amazon.opendistroforelasticsearch.alerting.model.AggregationTrigger
+
 import com.amazon.opendistroforelasticsearch.alerting.model.TriggerRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.action.Action
 import com.amazon.opendistroforelasticsearch.alerting.model.action.Action.Companion.MESSAGE
 import com.amazon.opendistroforelasticsearch.alerting.model.action.Action.Companion.MESSAGE_ID
 import com.amazon.opendistroforelasticsearch.alerting.model.action.Action.Companion.SUBJECT
 import com.amazon.opendistroforelasticsearch.alerting.model.destination.DestinationContextFactory
+import com.amazon.opendistroforelasticsearch.alerting.script.AggTriggerExecutionContext
 import com.amazon.opendistroforelasticsearch.alerting.script.TriggerExecutionContext
 import com.amazon.opendistroforelasticsearch.alerting.settings.AlertingSettings.Companion.ALERT_BACKOFF_COUNT
 import com.amazon.opendistroforelasticsearch.alerting.settings.AlertingSettings.Companion.ALERT_BACKOFF_MILLIS
@@ -242,7 +247,7 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
         }
     }
 
-    suspend fun runMonitor(monitor: Monitor, periodStart: Instant, periodEnd: Instant, dryrun: Boolean = false): MonitorRunResult {
+    suspend fun runMonitor(monitor: Monitor, periodStart: Instant, periodEnd: Instant, dryrun: Boolean = false): MonitorRunResult<TraditionalTriggerRunResult> {
         val roles = getRolesForMonitor(monitor)
         logger.debug("Running monitor: ${monitor.name} with roles: $roles Thread: ${Thread.currentThread().name}")
 
@@ -250,7 +255,7 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
             logger.warn("Start and end time are the same: $periodStart. This monitor will probably only run once.")
         }
 
-        var monitorResult = MonitorRunResult(monitor.name, periodStart, periodEnd)
+        var monitorResult = MonitorRunResult<TraditionalTriggerRunResult>(monitor.name, periodStart, periodEnd)
         val currentAlerts = try {
             alertIndices.createOrUpdateAlertIndex()
             alertIndices.createOrUpdateInitialHistoryIndex()
@@ -270,11 +275,11 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
         }
 
         val updatedAlerts = mutableListOf<Alert>()
-        val triggerResults = mutableMapOf<String, TriggerRunResult>()
+        val triggerResults = mutableMapOf<String, TraditionalTriggerRunResult>()
         for (trigger in monitor.triggers) {
             val currentAlert = currentAlerts[trigger]
             val triggerCtx = TriggerExecutionContext(monitor, trigger as TraditionalTrigger, monitorResult, currentAlert)
-            val triggerResult = triggerService.runTraditionalTrigger(monitor, trigger, triggerCtx)
+            val triggerResult = triggerService.runTraditionalTrigger(monitor, trigger, triggerCtx) as TraditionalTriggerRunResult
             triggerResults[trigger.id] = triggerResult
 
             if (triggerService.isTriggerActionable(triggerCtx, triggerResult)) {
@@ -301,7 +306,7 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
         periodStart: Instant,
         periodEnd: Instant,
         dryrun: Boolean = false
-    ): MonitorRunResult {
+    ): MonitorRunResult<AggMonitorTriggerRunResult> {
         val roles = getRolesForMonitor(monitor)
         logger.debug("Running monitor: ${monitor.name} with roles: $roles Thread: ${Thread.currentThread().name}")
 
@@ -311,7 +316,7 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
 
         // TODO: Should we use MonitorRunResult for both Monitor types or create an AggregationMonitorRunResult
         //  to store InternalComposite instead of Map<String, Any>?
-        var monitorResult = MonitorRunResult(monitor.name, periodStart, periodEnd)
+        var monitorResult = MonitorRunResult<AggMonitorTriggerRunResult>(monitor.name, periodStart, periodEnd)
         val currentAlerts = try {
             alertIndices.createOrUpdateAlertIndex()
             alertIndices.createOrUpdateInitialHistoryIndex()
@@ -331,6 +336,38 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
             monitorResult = monitorResult.copy(inputResults = inputService.collectInputResults(monitor, periodStart, periodEnd))
         }
 
+        val updatedAlerts = mutableListOf<Alert>()
+        val triggerResults = mutableMapOf<String, AggMonitorTriggerRunResult>()
+        for (trigger in monitor.triggers) {
+            val currentAlerts = currentAlerts[trigger]
+            val triggerCtx = AggTriggerExecutionContext(monitor, trigger as AggregationTrigger, monitorResult, currentAlerts)
+            val triggerResult = triggerService.runAggTrigger(monitor, trigger, triggerCtx) as AggMonitorTriggerRunResult
+            triggerResults[trigger.id] = triggerResult
+
+            triggerResult.aggAlertBuckets.forEach { aggAlertBucket ->
+                if (triggerService.isAggTriggerBucketActionable(triggerCtx, triggerResult, aggAlertBucket.value)) {
+                    val actionCtx = triggerCtx.copy(error = monitorResult.error ?: triggerResult.error)
+                    val actionResults: MutableMap<String, ActionRunResult> = mutableMapOf()
+                    for (action in trigger.actions) {
+                        actionResults[action.id] = runAggAction(action, actionCtx, dryrun)
+                    }
+                    triggerResult.actionResultsMap[aggAlertBucket.key] = actionResults
+                }
+            }
+            val updatedAggAlerts = alertService.composeAggAlerts(
+                triggerCtx, triggerResult,
+                monitorResult.alertError() ?: triggerResult.alertError()
+            )
+            updatedAggAlerts.forEach{aggAlert ->
+                if (aggAlert != null)
+                    updatedAlerts += aggAlert
+            }
+        }
+
+        // Don't save alerts if this is a test monitor
+        if (!dryrun && monitor.id != Monitor.NO_ID) {
+            alertService.saveAlerts(updatedAlerts, retryPolicy)
+        }
         // TODO: Iterate through buckets and execute Trigger scripts against each bucket creating a Trigger -> buckets mappings for alert
         //  creation.
 
@@ -343,7 +380,7 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
 
         // TODO: Update alerts in alerting config index
 
-        return monitorResult
+        return monitorResult.copy(triggerResults = triggerResults)
     }
 
     private fun getRolesForMonitor(monitor: Monitor): List<String> {
@@ -412,6 +449,10 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
         } catch (e: Exception) {
             ActionRunResult(action.id, action.name, mapOf(), false, currentTime(), e)
         }
+    }
+
+    private suspend fun runAggAction(action: Action, ctx: AggTriggerExecutionContext, dryrun: Boolean): ActionRunResult {
+        return ActionRunResult(action.id, action.name, HashMap(), false, currentTime(), null)
     }
 
     private fun compileTemplate(template: Script, ctx: TriggerExecutionContext): String {

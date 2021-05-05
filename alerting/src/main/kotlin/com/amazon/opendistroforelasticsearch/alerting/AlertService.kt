@@ -21,10 +21,12 @@ import com.amazon.opendistroforelasticsearch.alerting.elasticapi.firstFailureOrN
 import com.amazon.opendistroforelasticsearch.alerting.elasticapi.retry
 import com.amazon.opendistroforelasticsearch.alerting.elasticapi.suspendUntil
 import com.amazon.opendistroforelasticsearch.alerting.model.ActionExecutionResult
+import com.amazon.opendistroforelasticsearch.alerting.model.AggMonitorTriggerRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.Alert
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
+import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTriggerRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.Trigger
-import com.amazon.opendistroforelasticsearch.alerting.model.TriggerRunResult
+import com.amazon.opendistroforelasticsearch.alerting.script.AggTriggerExecutionContext
 import com.amazon.opendistroforelasticsearch.alerting.script.TriggerExecutionContext
 import com.amazon.opendistroforelasticsearch.alerting.util.IndexUtils
 import org.apache.logging.log4j.LogManager
@@ -85,7 +87,7 @@ class AlertService(
 
     // TODO: For now this is largely a duplicate of the regular loadCurrentAlerts()
     //  The original method could be refactored to support Set if this is the final usage
-    suspend fun loadCurrentAlertsForAggregationMonitor(monitor: Monitor): Map<Trigger, Set<Alert>?> {
+    suspend fun loadCurrentAlertsForAggregationMonitor(monitor: Monitor): Map<Trigger, HashMap<String?, Alert>?> {
         val request = SearchRequest(AlertIndices.ALERT_INDEX)
             .routing(monitor.id)
             .source(alertQuery(monitor))
@@ -97,12 +99,13 @@ class AlertService(
         val foundAlerts = response.hits.map { Alert.parse(contentParser(it.sourceRef), it.id, it.version) }
             .groupBy { it.triggerId }
 
-        return monitor.triggers.associate { trigger ->
-            trigger to (foundAlerts[trigger.id]?.toSet())
+        return monitor.triggers.associateWith { trigger ->
+            (foundAlerts[trigger.id]?.associate
+            { alert -> alert.aggAlertBucket?.bucketKey to alert }) as HashMap<String?, Alert>?
         }
     }
 
-    fun composeAlert(ctx: TriggerExecutionContext, result: TriggerRunResult, alertError: AlertError?): Alert? {
+    fun composeAlert(ctx: TriggerExecutionContext, result: TraditionalTriggerRunResult, alertError: AlertError?): Alert? {
         val currentTime = Instant.now()
         val currentAlert = ctx.alert
 
@@ -150,6 +153,66 @@ class AlertService(
                 errorHistory = updatedHistory, actionExecutionResults = updatedActionExecutionResults,
                 schemaVersion = IndexUtils.alertIndexSchemaVersion)
         }
+    }
+
+    fun composeAggAlerts(ctx: AggTriggerExecutionContext, result: AggMonitorTriggerRunResult, alertError: AlertError?): MutableList<Alert?> {
+        val createdAlerts: ArrayList<Alert?> = ArrayList()
+        result.aggAlertBuckets.forEach { currBucket ->
+            val currentAlert = ctx.alerts?.get(currBucket.key)
+            val currentTime = Instant.now()
+            val updatedActionExecutionResults = mutableListOf<ActionExecutionResult>()
+            val currentActionIds = mutableSetOf<String>()
+            if (currentAlert != null) {
+                // update current alert's action execution results
+                for (actionExecutionResult in currentAlert.actionExecutionResults) {
+                    val actionId = actionExecutionResult.actionId
+                    currentActionIds.add(actionId)
+                    val actionRunResult = result.actionResultsMap[currBucket.key]?.get(actionId)
+                    when {
+                        actionRunResult == null -> updatedActionExecutionResults.add(actionExecutionResult)
+                        actionRunResult.throttled ->
+                            updatedActionExecutionResults.add(actionExecutionResult.copy(
+                                throttledCount = actionExecutionResult.throttledCount + 1))
+                        else -> updatedActionExecutionResults.add(actionExecutionResult.copy(lastExecutionTime = actionRunResult.executionTime))
+                    }
+                }
+                // add action execution results which not exist in current alert
+                result.actionResultsMap[currBucket.key]?.filter { it -> !currentActionIds.contains(it.key) }?.let { it1 ->
+                    updatedActionExecutionResults.addAll(
+                        it1
+                            .map { it -> ActionExecutionResult(it.key, it.value.executionTime, if (it.value.throttled) 1 else 0) })
+                }
+            } else {
+                result.actionResultsMap[currBucket.key]?.let { it1 ->
+                    updatedActionExecutionResults.addAll(it1.map { it -> ActionExecutionResult(it.key, it.value.executionTime,
+                        if (it.value.throttled) 1 else 0) })
+                }
+            }
+
+            // TODO: revisit below logic
+            // Merge the alert's error message to the current alert's history
+            val updatedHistory = currentAlert?.errorHistory.update(alertError)
+            createdAlerts.add(if (currentAlert == null && alertError == null) {
+                Alert(monitor = ctx.monitor, trigger = ctx.trigger, startTime = currentTime,
+                    lastNotificationTime = currentTime, state = Alert.State.ACTIVE, errorMessage = null,
+                    errorHistory = updatedHistory, actionExecutionResults = updatedActionExecutionResults,
+                    schemaVersion = IndexUtils.alertIndexSchemaVersion, aggAlertBucket = currBucket.value)
+            } else if (currentAlert?.isAcknowledged() == true) {
+                null
+            } else if (currentAlert != null) {
+                val alertState = Alert.State.ERROR
+                currentAlert.copy(state = alertState, lastNotificationTime = currentTime, errorMessage = alertError?.message,
+                    errorHistory = updatedHistory, actionExecutionResults = updatedActionExecutionResults,
+                    schemaVersion = IndexUtils.alertIndexSchemaVersion,  aggAlertBucket = currBucket.value)
+            } else {
+                val alertState = Alert.State.ERROR
+                Alert(monitor = ctx.monitor, trigger = ctx.trigger, startTime = currentTime,
+                    lastNotificationTime = currentTime, state = alertState, errorMessage = alertError?.message,
+                    errorHistory = updatedHistory, actionExecutionResults = updatedActionExecutionResults,
+                    schemaVersion = IndexUtils.alertIndexSchemaVersion, aggAlertBucket = currBucket.value)
+            })
+        }
+        return createdAlerts
     }
 
     suspend fun saveAlerts(alerts: List<Alert>, retryPolicy: BackoffPolicy) {

@@ -25,16 +25,18 @@ import org.elasticsearch.common.io.stream.Writeable
 import org.elasticsearch.common.xcontent.ToXContent
 import org.elasticsearch.common.xcontent.XContentBuilder
 import org.elasticsearch.script.ScriptException
+import org.elasticsearch.search.aggregations.bucket.terms.IncludeExclude
 import java.io.IOException
 import java.time.Instant
 
-data class MonitorRunResult(
+
+data class MonitorRunResult<TriggerResult: TriggerRunResult>(
     val monitorName: String,
     val periodStart: Instant,
     val periodEnd: Instant,
     val error: Exception? = null,
     val inputResults: InputRunResults = InputRunResults(),
-    val triggerResults: Map<String, TriggerRunResult> = mapOf()
+    val triggerResults: Map<String, TriggerResult> = mapOf()
 ) : Writeable, ToXContent {
 
     @Throws(IOException::class)
@@ -44,7 +46,7 @@ data class MonitorRunResult(
         sin.readInstant(), // periodEnd
         sin.readException(), // error
         InputRunResults.readFrom(sin), // inputResults
-        suppressWarning(sin.readMap()) // triggerResults
+        suppressWarning(sin.readMap()) as Map<String, TriggerResult> // triggerResults
     )
 
     override fun toXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder {
@@ -77,7 +79,7 @@ data class MonitorRunResult(
     companion object {
         @JvmStatic
         @Throws(IOException::class)
-        fun readFrom(sin: StreamInput): MonitorRunResult {
+        fun readFrom(sin: StreamInput): MonitorRunResult<TriggerRunResult> {
             return MonitorRunResult(sin)
         }
 
@@ -135,36 +137,70 @@ data class InputRunResults(val results: List<Map<String, Any>> = listOf(), val e
     }
 }
 
-data class TriggerRunResult(
-    val triggerName: String,
-    val triggered: Boolean,
-    val error: Exception? = null,
-    val actionResults: MutableMap<String, ActionRunResult> = mutableMapOf()
+abstract class TriggerRunResult(
+    open var triggerName: String,
+    open var error: Exception? = null
 ) : Writeable, ToXContent {
 
-    @Throws(IOException::class)
-    constructor(sin: StreamInput): this(
-        sin.readString(), // triggerName
-        sin.readBoolean(), // triggered
-        sin.readException(), // error
-        suppressWarning(sin.readMap()) // actionResults
-    )
-
     override fun toXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder {
-        var msg = error?.message
-        if (error is ScriptException) msg = error.toJsonString()
-        return builder.startObject()
-                .field("name", triggerName)
-                .field("triggered", triggered)
-                .field("error", msg)
-                .field("action_results", actionResults as Map<String, ActionRunResult>)
-                .endObject()
+        val msg = error?.message
+        builder.startObject()
+            .field("name", triggerName)
+            .field("error", msg)
+        internalXContent(builder, params)
+        builder.endObject()
+        return builder
     }
 
+    abstract fun internalXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder
+
     /** Returns error information to store in the Alert. Currently it's just the stack trace but it can be more */
-    fun alertError(): AlertError? {
+    open fun alertError(): AlertError? {
         if (error != null) {
-            return AlertError(Instant.now(), "Failed evaluating trigger:\n${error.userErrorMessage()}")
+            return AlertError(Instant.now(), "Failed evaluating trigger:\n${error!!.userErrorMessage()}")
+        }
+        return null
+    }
+
+    @Throws(IOException::class)
+    override fun writeTo(out: StreamOutput) {
+        out.writeString(triggerName)
+        out.writeException(error)
+    }
+
+    companion object {
+        @Suppress("UNCHECKED_CAST")
+        fun suppressWarning(map: MutableMap<String?, Any?>?): MutableMap<String, ActionRunResult> {
+            return map as MutableMap<String, ActionRunResult>
+        }
+    }
+}
+
+class TraditionalTriggerRunResult: TriggerRunResult {
+    val triggered: Boolean
+    var actionResults: MutableMap<String, ActionRunResult>
+    constructor(
+        triggerName: String,
+        triggered: Boolean,
+        error: Exception? = null,
+        actionResults: MutableMap<String, ActionRunResult> = mutableMapOf()
+    ) : super(triggerName, error) {
+        this.triggered = triggered
+        this.actionResults = actionResults
+    }
+
+    @Throws(IOException::class)
+    constructor(sin: StreamInput): super(
+        sin.readString(), // triggerName
+        sin.readException()
+    ) {
+        this.triggered = sin.readBoolean()
+        this.actionResults = suppressWarning(sin.readMap()) // actionResults
+    }
+
+    override fun alertError(): AlertError? {
+        if (error != null) {
+            return AlertError(Instant.now(), "Failed evaluating trigger:\n${error!!.userErrorMessage()}")
         }
         for (actionResult in actionResults.values) {
             if (actionResult.error != null) {
@@ -174,11 +210,17 @@ data class TriggerRunResult(
         return null
     }
 
+    override fun internalXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder {
+        if (error is ScriptException) error = Exception((error as ScriptException).toJsonString(), error)
+        return builder
+            .field("triggered", triggered)
+            .field("action_results", actionResults as Map<String, ActionRunResult>)
+    }
+
     @Throws(IOException::class)
     override fun writeTo(out: StreamOutput) {
-        out.writeString(triggerName)
+        super.writeTo(out)
         out.writeBoolean(triggered)
-        out.writeException(error)
         out.writeMap(actionResults as Map<String, ActionRunResult>)
     }
 
@@ -186,12 +228,60 @@ data class TriggerRunResult(
         @JvmStatic
         @Throws(IOException::class)
         fun readFrom(sin: StreamInput): TriggerRunResult {
-            return TriggerRunResult(sin)
+            return TraditionalTriggerRunResult(sin)
+        }
+    }
+}
+
+class AggMonitorTriggerRunResult(
+    triggerName: String,
+    error: Exception? = null,
+    var aggAlertBuckets: Map<String?, AggAlertBucket>,
+    var actionResultsMap: MutableMap<String?, MutableMap<String, ActionRunResult>> = mutableMapOf()
+) : TriggerRunResult(triggerName, error) {
+
+    @Throws(IOException::class)
+    constructor(sin: StreamInput): this(
+        sin.readString(),
+        sin.readException() as Exception?, // error
+        sin.readMap(StreamInput::readString, ::AggAlertBucket),
+        readActionResultsMap(sin)
+    )
+
+    override fun internalXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder {
+        return builder
+            .field(AGG_ALERTS_FIELD, aggAlertBuckets)
+    }
+
+    @Throws(IOException::class)
+    override fun writeTo(out: StreamOutput) {
+        super.writeTo(out)
+        out.writeMap(aggAlertBuckets)
+        out.writeInt(actionResultsMap.size)
+        actionResultsMap.forEach {
+            out.writeString(it.key)
+            out.writeMap(it.value as Map<String, ActionRunResult>)
+        }
+    }
+
+    companion object {
+        const val AGG_ALERTS_FIELD = "agg_alerts"
+
+        @JvmStatic
+        @Throws(IOException::class)
+        fun readFrom(sin: StreamInput): TriggerRunResult {
+            return AggMonitorTriggerRunResult(sin)
         }
 
-        @Suppress("UNCHECKED_CAST")
-        fun suppressWarning(map: MutableMap<String?, Any?>?): MutableMap<String, ActionRunResult> {
-            return map as MutableMap<String, ActionRunResult>
+        fun readActionResultsMap(sin: StreamInput): MutableMap<String?, MutableMap<String, ActionRunResult>> {
+            val size: Int = sin.readVInt()
+            val actionResultsMap: MutableMap<String?, MutableMap<String, ActionRunResult>> = mutableMapOf()
+            for (i in 0 until size) {
+                val bucketKey = sin.readString()
+                val actionResults = suppressWarning(sin.readMap())
+                actionResultsMap[bucketKey] = actionResults
+            }
+            return actionResultsMap
         }
     }
 }

@@ -27,6 +27,7 @@ import com.amazon.opendistroforelasticsearch.alerting.model.InputRunResults
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import com.amazon.opendistroforelasticsearch.alerting.model.MonitorRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTrigger
+import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTriggerRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.Trigger
 import com.amazon.opendistroforelasticsearch.alerting.model.TriggerRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.action.Action
@@ -183,8 +184,8 @@ fun randomActionExecutionResult(
     throttledCount: Int = randomInt()
 ) = ActionExecutionResult(actionId, lastExecutionTime, throttledCount)
 
-fun randomMonitorRunResult(): MonitorRunResult {
-    val triggerResults = mutableMapOf<String, TriggerRunResult>()
+fun randomMonitorRunResult(): MonitorRunResult<TraditionalTriggerRunResult> {
+    val triggerResults = mutableMapOf<String, TraditionalTriggerRunResult>()
     val triggerRunResult = randomTriggerRunResult()
     triggerResults.plus(Pair("test", triggerRunResult))
 
@@ -206,7 +207,7 @@ fun randomTriggerRunResult(): TriggerRunResult {
     val map = mutableMapOf<String, ActionRunResult>()
     map.plus(Pair("key1", randomActionRunResult()))
     map.plus(Pair("key2", randomActionRunResult()))
-    return TriggerRunResult("trigger-name", true, null, map)
+    return TraditionalTriggerRunResult("trigger-name", true, null, map)
 }
 
 fun randomActionRunResult(): ActionRunResult {

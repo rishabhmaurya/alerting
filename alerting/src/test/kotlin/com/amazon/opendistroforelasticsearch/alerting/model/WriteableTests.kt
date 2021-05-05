@@ -117,7 +117,7 @@ class WriteableTests : ESTestCase() {
         val out = BytesStreamOutput()
         runResult.writeTo(out)
         val sin = StreamInput.wrap(out.bytes().toBytesRef().bytes)
-        val newRunResult = TriggerRunResult(sin)
+        val newRunResult = TraditionalTriggerRunResult(sin)
         assertEquals("Round tripping ActionRunResult doesn't work", runResult, newRunResult)
     }
 
@@ -135,7 +135,7 @@ class WriteableTests : ESTestCase() {
         val out = BytesStreamOutput()
         runResult.writeTo(out)
         val sin = StreamInput.wrap(out.bytes().toBytesRef().bytes)
-        val newRunResult = MonitorRunResult(sin)
+        val newRunResult = MonitorRunResult<TraditionalTriggerRunResult>(sin)
         assertEquals("Round tripping MonitorRunResult doesn't work", runResult, newRunResult)
     }
 

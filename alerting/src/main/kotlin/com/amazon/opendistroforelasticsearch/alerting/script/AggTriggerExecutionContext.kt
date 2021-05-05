@@ -15,26 +15,28 @@
 
 package com.amazon.opendistroforelasticsearch.alerting.script
 
+import com.amazon.opendistroforelasticsearch.alerting.model.AggMonitorTriggerRunResult
+import com.amazon.opendistroforelasticsearch.alerting.model.AggregationTrigger
 import com.amazon.opendistroforelasticsearch.alerting.model.Alert
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import com.amazon.opendistroforelasticsearch.alerting.model.MonitorRunResult
 import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTrigger
-import com.amazon.opendistroforelasticsearch.alerting.model.TraditionalTriggerRunResult
 import java.time.Instant
 
-data class TriggerExecutionContext(
+data class AggTriggerExecutionContext(
     val monitor: Monitor,
-    val trigger: TraditionalTrigger,
+    val trigger: AggregationTrigger,
     val results: List<Map<String, Any>>,
     val periodStart: Instant,
     val periodEnd: Instant,
-    val alert: Alert? = null,
+    val alerts: HashMap<String?, Alert>? = null,
     val error: Exception? = null
 ) {
 
-    constructor(monitor: Monitor, trigger: TraditionalTrigger, monitorRunResult: MonitorRunResult<TraditionalTriggerRunResult>, alert: Alert? = null):
+    constructor(monitor: Monitor, trigger: AggregationTrigger, monitorRunResult: MonitorRunResult<AggMonitorTriggerRunResult>,
+                alerts: HashMap<String?, Alert>? = null):
             this(monitor, trigger, monitorRunResult.inputResults.results, monitorRunResult.periodStart,
-            monitorRunResult.periodEnd, alert, monitorRunResult.scriptContextError(trigger))
+            monitorRunResult.periodEnd, alerts, monitorRunResult.scriptContextError(trigger))
 
     /**
      * Mustache templates need special permissions to reflectively introspect field names. To avoid doing this we
@@ -46,7 +48,7 @@ data class TriggerExecutionContext(
                 "results" to results,
                 "periodStart" to periodStart,
                 "periodEnd" to periodEnd,
-                "alert" to alert?.asTemplateArg(),
+                "alerts" to alerts,
                 "error" to error)
     }
 }

@@ -18,6 +18,7 @@ package com.amazon.opendistroforelasticsearch.alerting
 import com.amazon.opendistroforelasticsearch.alerting.core.model.SearchInput
 import com.amazon.opendistroforelasticsearch.alerting.elasticapi.convertToMap
 import com.amazon.opendistroforelasticsearch.alerting.elasticapi.suspendUntil
+import com.amazon.opendistroforelasticsearch.alerting.model.AggregationTrigger
 import com.amazon.opendistroforelasticsearch.alerting.model.InputRunResults
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import com.amazon.opendistroforelasticsearch.alerting.util.addUserBackendRolesFilter
@@ -53,6 +54,12 @@ class InputService(
                         // TODO: Figure out a way to use SearchTemplateRequest without bringing in the entire TransportClient
                         val searchParams = mapOf("period_start" to periodStart.toEpochMilli(),
                             "period_end" to periodEnd.toEpochMilli())
+                        // Add bucket selector aggregators for all triggers
+                        monitor.triggers.forEach {trigger ->
+                            if (trigger is AggregationTrigger)
+                                input.query.aggregation(trigger.bucketSelector)
+                        }
+
                         val searchSource = scriptService.compile(Script(ScriptType.INLINE, Script.DEFAULT_TEMPLATE_LANG,
                             input.query.toString(), searchParams), TemplateScript.CONTEXT)
                             .newInstance(searchParams)
