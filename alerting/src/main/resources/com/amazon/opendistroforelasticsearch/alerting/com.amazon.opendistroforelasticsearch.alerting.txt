@@ -4,7 +4,7 @@
 
 class com.amazon.opendistroforelasticsearch.alerting.script.TriggerScript {
     Map getParams()
-    boolean execute(TriggerExecutionContext)
+    boolean execute(TraditionalTriggerExecutionContext)
     String[] PARAMETERS
 }
 
