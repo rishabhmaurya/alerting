@@ -324,27 +324,29 @@ object MonitorRunner : JobRunner, CoroutineScope, AbstractLifecycleComponent() {
             logger.error("Error loading alerts for monitor: $id", e)
             return monitorResult.copy(error = e)
         }
+        do {
+            // TODO: Since a composite aggregation is being used for the input query, the total bucket count cannot be determined.
+            //  If a setting is imposed that limits buckets that can be processed for Aggregation Monitors, we'd need to iterate over
+            //  the buckets until we hit that threshold. In that case, we'd want to exit the execution without creating any alerts since the
+            //  buckets we iterate over before hitting the limit is not deterministic. Is there a better way to fail faster in this case?
 
-        // TODO: Since a composite aggregation is being used for the input query, the total bucket count cannot be determined.
-        //  If a setting is imposed that limits buckets that can be processed for Aggregation Monitors, we'd need to iterate over
-        //  the buckets until we hit that threshold. In that case, we'd want to exit the execution without creating any alerts since the
-        //  buckets we iterate over before hitting the limit is not deterministic. Is there a better way to fail faster in this case?
-        runBlocking(InjectorContextElement(monitor.id, settings, threadPool.threadContext, roles)) {
-            monitorResult = monitorResult.copy(inputResults = inputService.collectInputResults(monitor, periodStart, periodEnd))
-        }
+            runBlocking(InjectorContextElement(monitor.id, settings, threadPool.threadContext, roles)) {
+                monitorResult = monitorResult.copy(inputResults = inputService.collectInputResults(monitor, periodStart, periodEnd,
+                    monitorResult.inputResults))
+            }
 
-        // TODO: Iterate through buckets and execute Trigger scripts against each bucket creating a Trigger -> buckets mappings for alert
-        //  creation.
+            // TODO: Iterate through buckets and execute Trigger scripts against each bucket creating a Trigger -> buckets mappings for alert
+            //  creation.
 
-        // TODO: Separate buckets/alerts into categories so that the alerts can be created/updated accordingly:
-        //  * De-duped alerts = currentAlerts U filteredBuckets
-        //  * Completed alerts = currentAlerts - de-duped alerts
-        //  * New alerts = filteredBuckets - de-duped alerts
+            // TODO: Separate buckets/alerts into categories so that the alerts can be created/updated accordingly:
+            //  * De-duped alerts = currentAlerts U filteredBuckets
+            //  * Completed alerts = currentAlerts - de-duped alerts
+            //  * New alerts = filteredBuckets - de-duped alerts
 
-        // TODO: Run Actions for a Trigger and compose alerts
+            // TODO: Run Actions for a Trigger and compose alerts
 
-        // TODO: Update alerts in alerting config index
-
+            // TODO: Update alerts in alerting config index
+        } while (monitorResult.inputResults.afterKeysPresent())
         return monitorResult
     }
 
